@@ -429,7 +429,7 @@ bool AFLCoverage::runOnModule(Module &M) {
 
       for (auto &BB : F) {
 
-        distance = -1;
+        distance = -2;
 
         if (is_aflgo) {
 
@@ -513,6 +513,8 @@ bool AFLCoverage::runOnModule(Module &M) {
 
           ConstantInt *Distance =
               ConstantInt::get(LargestType, (unsigned) distance);
+          ConstantInt *Zero =
+              ConstantInt::get(LargestType, (unsigned) 0);
 
           /* Add distance to shm[MAPSIZE] */
 
@@ -521,9 +523,16 @@ bool AFLCoverage::runOnModule(Module &M) {
           LoadInst *MapDist = IRB.CreateLoad(MapDistPtr);
           MapDist->setMetadata(M.getMDKindID("nosanitize"), MDNode::get(C, None));
 
-          Value *IncrDist = IRB.CreateAdd(MapDist, Distance);
-          IRB.CreateStore(IncrDist, MapDistPtr)
-              ->setMetadata(M.getMDKindID("nosanitize"), MDNode::get(C, None));
+          Value *Sub = IRB.CreateSub(Distance, MapDist);
+          ConstantInt *Bits = ConstantInt::get(LargestType, 63);
+          Value *Lshr = IRB.CreateLShr(Sub, Bits);
+          Value *Mul1 = IRB.CreateMul(Lshr, Distance);
+          Value *Sub1 = IRB.CreateSub(One, Lshr);
+          Value *Mul2 = IRB.CreateMul(Sub1, MapDist);
+          Value *Incr = IRB.CreateAdd(Mul1, Mul2);
+
+          IRB.CreateStore(Incr, MapDistPtr)
+           ->setMetadata(M.getMDKindID("nosanitize"), MDNode::get(C, None));
 
           /* Increase count at shm[MAPSIZE + (4 or 8)] */
 
@@ -536,6 +545,12 @@ bool AFLCoverage::runOnModule(Module &M) {
           IRB.CreateStore(IncrCnt, MapCntPtr)
               ->setMetadata(M.getMDKindID("nosanitize"), MDNode::get(C, None));
 
+
+        }else if (distance == -1){
+          llvm::FunctionCallee exitFunc = M.getOrInsertFunction(
+              "exit", llvm::FunctionType::get(
+                llvm::Type::getVoidTy(M.getContext()), Int32Ty, false));
+          IRB.CreateCall(exitFunc, {IRB.getInt32(0)});
         }
 
         inst_blocks++;
