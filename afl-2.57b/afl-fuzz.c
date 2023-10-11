@@ -833,6 +833,7 @@ static void add_to_queue(u8* fname, u32 len, u8 passed_det) {
     if (max_distance <= 0) {
       max_distance = cur_distance;
       min_distance = cur_distance;
+      total_times = 1;
     }
     if (cur_distance > max_distance) max_distance = cur_distance;
     if (cur_distance < min_distance) min_distance = cur_distance;
@@ -951,7 +952,7 @@ static inline u8 has_new_bits(u8* virgin_map) {
   u64* total_count = (u64*) (trace_bits + MAP_SIZE + 8);
 
   if (*total_count > 0)
-    cur_distance = (double) (*total_distance) / (double) (*total_count);
+    cur_distance = (double) (*total_distance);
   else
     cur_distance = -1.0;
 
@@ -972,7 +973,7 @@ static inline u8 has_new_bits(u8* virgin_map) {
   u32* total_count = (u32*)(trace_bits + MAP_SIZE + 4);
 
   if (*total_count > 0) {
-    cur_distance = (double) (*total_distance) / (double) (*total_count);
+    cur_distance = (double) (*total_distance);
   else
     cur_distance = -1.0;
 
@@ -2715,6 +2716,7 @@ static u8 calibrate_case(char** argv, struct queue_entry* q, u8* use_mem,
         if (max_distance <= 0) {
           max_distance = cur_distance;
           min_distance = cur_distance;
+          total_times = 1;
         }
         if (cur_distance > max_distance) max_distance = cur_distance;
         if (cur_distance < min_distance) min_distance = cur_distance;
@@ -3272,8 +3274,8 @@ static u8 save_if_interesting(char** argv, void* mem, u32 len, u8 fault) {
 #ifndef SIMPLE_FILES
 
 #  if AFLGO_IMPL
-    fn = alloc_printf("%s/queue/id:%06u,%llu,%s", out_dir, queued_paths,
-                      get_cur_time() - start_time,
+    fn = alloc_printf("%s/queue/id:%06u,%llu,%06u,%s", out_dir, queued_paths,
+                      get_cur_time() - start_time, (u32)cur_distance,
                       describe_op(hnb));
 #  else
     fn = alloc_printf("%s/queue/id:%06u,%s", out_dir, queued_paths,
