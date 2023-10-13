@@ -2368,6 +2368,8 @@ static u8 run_target(char** argv, u32 timeout) {
 
 #if AFLGO_IMPL
   memset(trace_bits, 0, MAP_SIZE + 16);
+  u64 max = INT_MAX;
+  memcpy(trace_bits+MAP_SIZE, &max, sizeof(u64));
 #else
   memset(trace_bits, 0, MAP_SIZE);
 #endif // AFLGO_IMPL
@@ -3274,7 +3276,7 @@ static u8 save_if_interesting(char** argv, void* mem, u32 len, u8 fault) {
 #ifndef SIMPLE_FILES
 
 #  if AFLGO_IMPL
-    fn = alloc_printf("%s/queue/id:%06u,%llu,%06u,%s", out_dir, queued_paths,
+    fn = alloc_printf("%s/queue/id:%06u,ts:%llu,dis:%06u,%s", out_dir, queued_paths,
                       get_cur_time() - start_time, (u32)cur_distance,
                       describe_op(hnb));
 #  else
