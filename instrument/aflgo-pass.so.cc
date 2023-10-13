@@ -513,8 +513,6 @@ bool AFLCoverage::runOnModule(Module &M) {
 
           ConstantInt *Distance =
               ConstantInt::get(LargestType, (unsigned) distance);
-          ConstantInt *Zero =
-              ConstantInt::get(LargestType, (unsigned) 0);
 
           /* Add distance to shm[MAPSIZE] */
 
