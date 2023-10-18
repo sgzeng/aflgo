@@ -56,6 +56,7 @@
 #include <termios.h>
 #include <dlfcn.h>
 #include <sched.h>
+#include <limits.h>
 
 #include <sys/wait.h>
 #include <sys/time.h>
@@ -833,7 +834,6 @@ static void add_to_queue(u8* fname, u32 len, u8 passed_det) {
     if (max_distance <= 0) {
       max_distance = cur_distance;
       min_distance = cur_distance;
-      total_times = 1;
     }
     if (cur_distance > max_distance) max_distance = cur_distance;
     if (cur_distance < min_distance) min_distance = cur_distance;
@@ -2718,7 +2718,6 @@ static u8 calibrate_case(char** argv, struct queue_entry* q, u8* use_mem,
         if (max_distance <= 0) {
           max_distance = cur_distance;
           min_distance = cur_distance;
-          total_times = 1;
         }
         if (cur_distance > max_distance) max_distance = cur_distance;
         if (cur_distance < min_distance) min_distance = cur_distance;
