@@ -207,7 +207,7 @@ bool AFLCoverage::runOnModule(Module &M) {
 
         std::size_t pos = line.find(",");
         std::string bb_name = line.substr(0, pos);
-        int bb_dis = (int) (100.0 * atof(line.substr(pos + 1, line.length()).c_str()));
+        int bb_dis = (int) (atof(line.substr(pos + 1, line.length()).c_str()));
 
         bb_to_dis.emplace(bb_name, bb_dis);
         basic_blocks.push_back(bb_name);
