@@ -3275,8 +3275,8 @@ static u8 save_if_interesting(char** argv, void* mem, u32 len, u8 fault) {
 #ifndef SIMPLE_FILES
 
 #  if AFLGO_IMPL
-    fn = alloc_printf("%s/queue/id:%06u,ts:%llu,dis:%06u,%s", out_dir, queued_paths,
-                      get_cur_time() - start_time, (u32)cur_distance,
+    fn = alloc_printf("%s/queue/id:%06u,ts:%llu,dis:%06u,execs:%llu,%s", out_dir, queued_paths,
+                      get_cur_time() - start_time, (u32)cur_distance, total_execs,
                       describe_op(hnb));
 #  else
     fn = alloc_printf("%s/queue/id:%06u,%s", out_dir, queued_paths,
