@@ -8513,9 +8513,11 @@ int main(int argc, char** argv) {
       queue_cur->favored = 1;
       SAYF("fuzz imported file %s\n", queue_cur->fname);
 
-      fuzz_one(use_argv);
+      skipped_fuzz = fuzz_one(use_argv);
 
       if (stop_soon) break;
+
+      send(scheduler_fd, &skipped_fuzz, sizeof(skipped_fuzz), 0);
 
       continue; /* skip the rest */
 
