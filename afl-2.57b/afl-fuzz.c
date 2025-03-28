@@ -8506,10 +8506,54 @@ int main(int argc, char** argv) {
         PFATAL("Failed to receive file_id from the scheduler");
         break;
       }
+      struct queue_entry* found = NULL;
+      struct queue_entry *q = queue, *prev = NULL;
 
-      import_input(file_id, use_argv);
+      while (q) {
+        u8 *basename = strrchr(q->fname, '/');
+        if (!basename) {
+          q = q->next;
+          continue;
+        }
+    
+        basename++; // skip '/'
+        u32 q_id = 0;
+    
+        if (sscanf(basename, "id:%06u", &q_id) == 1) {
+          if (q_id == file_id) {
+    
+            /* If already at the top */
+            if (q == queue_top) {
+              found = q;
+              break;
+            }
+    
+            /* Remove from current spot */
+            if (prev) prev->next = q->next;
+    
+            /* Move to top */
+            q->next = NULL;
+            queue_top->next = q;
+            queue_top = q;
 
-      queue_cur = queue_top; /* assume the file is always imported successfully */
+            found = q;
+            SAYF("Promoted existing seed %s to top of queue\n", q->fname);
+            break;
+          }
+        }
+    
+        prev = q;
+        q = q->next;
+      }
+
+      if (!found) {
+          /* fallback */
+          import_input(file_id, use_argv);
+          queue_cur = queue_top; /* new imported seed is always at top */
+          SAYF("Imported new seed %s\n", queue_cur->fname);
+      } else {
+          queue_cur = found;
+      }
       queue_cur->favored = 1;
       SAYF("fuzz imported file %s\n", queue_cur->fname);
 
