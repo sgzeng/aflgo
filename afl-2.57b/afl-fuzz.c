@@ -8506,6 +8506,7 @@ int main(int argc, char** argv) {
         PFATAL("Failed to receive file_id from the scheduler");
         break;
       }
+      SAYF("Received file_id %u from the scheduler\n", file_id);
       struct queue_entry* found = NULL;
       struct queue_entry *q = queue, *prev = NULL;
 
@@ -8555,14 +8556,14 @@ int main(int argc, char** argv) {
           queue_cur = found;
       }
       queue_cur->favored = 1;
-      SAYF("fuzz imported file %s\n", queue_cur->fname);
 
       skipped_fuzz = fuzz_one(use_argv);
 
       if (stop_soon) break;
 
       send(scheduler_fd, &skipped_fuzz, sizeof(skipped_fuzz), 0);
-
+      SAYF("Sent %s to scheduler\n", skipped_fuzz ? "1" : "0");
+      current_entry++;
       continue; /* skip the rest */
 
     }
