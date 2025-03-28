@@ -8556,8 +8556,10 @@ int main(int argc, char** argv) {
           queue_cur = found;
       }
       queue_cur->favored = 1;
-
+      u32 old_pending_favored = pending_favored;
+      pending_favored = 0;
       skipped_fuzz = fuzz_one(use_argv);
+      pending_favored = old_pending_favored;
 
       if (stop_soon) break;
 
