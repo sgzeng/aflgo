@@ -8442,7 +8442,9 @@ int main(int argc, char** argv) {
     start_time += 4000;
     if (stop_soon) goto stop_fuzzing;
   }
-
+#if AFLGO_IMPL
+  if (unix_sock_fd != -1) queue_cycle = 1;
+#endif
   while (1) {
 
     u8 skipped_fuzz;
@@ -8465,6 +8467,7 @@ int main(int argc, char** argv) {
         tv.tv_sec = 1;
         tv.tv_usec = 0;
 
+        /* use select to give ctrl-c a chance to stop the fuzzer */
         activity = select(unix_sock_fd + 1, &readfds, NULL, NULL, &tv);
         if (activity < 0) {
           PFATAL("Failed to select unix sock fd");
@@ -8486,6 +8489,7 @@ int main(int argc, char** argv) {
       FD_ZERO(&readfds);
       FD_SET(scheduler_fd, &readfds);
 
+      /* use select to give ctrl-c a chance to stop the fuzzer */
       activity = select(scheduler_fd + 1, &readfds, NULL, NULL, &tv);
       if (activity < 0) {
         PFATAL("Failed to select on scheduler fd");
@@ -8507,65 +8511,53 @@ int main(int argc, char** argv) {
         break;
       }
       SAYF("Received file_id %u from the scheduler\n", file_id);
-      struct queue_entry* found = NULL;
-      struct queue_entry *q = queue, *prev = NULL;
 
-      while (q) {
-        u8 *basename = strrchr(q->fname, '/');
-        if (!basename) {
-          q = q->next;
-          continue;
-        }
-    
-        basename++; // skip '/'
-        u32 q_id = 0;
-    
-        if (sscanf(basename, "id:%06u", &q_id) == 1) {
-          if (q_id == file_id) {
-    
-            /* If already at the top */
-            if (q == queue_top) {
-              found = q;
-              break;
-            }
-    
-            /* Remove from current spot */
-            if (prev) prev->next = q->next;
-    
-            /* Move to top */
-            q->next = NULL;
-            queue_top->next = q;
-            queue_top = q;
+      /* use bit 31 to indicate whehter to import or find an existing one */
+      u8 import = (file_id & 0x80000000) >> 31;
+      file_id &= 0x7fffffff;
 
-            found = q;
-            SAYF("Promoted existing seed %s to top of queue\n", q->fname);
+      if (import) {
+
+        import_input(file_id, use_argv);
+        queue_cur = queue_top; /* new imported seed is always at top */
+        SAYF("Imported new seed %s\n", queue_cur->fname);
+
+      } else {
+
+        u8 fid[11];
+        snprintf(fid, 11, "%06u", file_id);
+
+        /* set default, just in case */
+        queue_cur = queue_top;
+
+        /* scan existing queue */
+        for (struct queue_entry *q = queue; q != NULL; q = q->next) {
+          u8 *rsl = strrchr(q->fname, '/');
+          if (!rsl) rsl = q->fname; else rsl++;
+
+          if (strncmp(rsl + 3, fid, 6) == 0) {
+            queue_cur = q;
+            SAYF("Found existing seed %s\n", q->fname);
             break;
           }
         }
-    
-        prev = q;
-        q = q->next;
+
       }
 
-      if (!found) {
-          /* fallback */
-          import_input(file_id, use_argv);
-          queue_cur = queue_top; /* new imported seed is always at top */
-          SAYF("Imported new seed %s\n", queue_cur->fname);
-      } else {
-          queue_cur = found;
-      }
       queue_cur->favored = 1;
-      u32 old_pending_favored = pending_favored;
       pending_favored = 0;
       skipped_fuzz = fuzz_one(use_argv);
-      pending_favored = old_pending_favored;
+
+      if (send(scheduler_fd, &unique_crashes, sizeof(unique_crashes), 0) < 0) {
+        SAYF("Scheduler closed the connection\n");
+        stop_soon = 2;
+      } else {
+        SAYF("Sent unique_crashes %llu to scheduler\n", unique_crashes);
+      }
+      current_entry++;
 
       if (stop_soon) break;
 
-      send(scheduler_fd, &skipped_fuzz, sizeof(skipped_fuzz), 0);
-      SAYF("Sent %s to scheduler\n", skipped_fuzz ? "1" : "0");
-      current_entry++;
       continue; /* skip the rest */
 
     }
