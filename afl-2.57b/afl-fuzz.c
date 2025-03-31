@@ -8506,7 +8506,7 @@ int main(int argc, char** argv) {
       }
 
       u32 file_id;
-      s32 ret = recv(scheduler_fd, &file_id, sizeof(file_id), 0);
+      s32 ret = recv(scheduler_fd, &file_id, sizeof(file_id), MSG_WAITALL);
       if (ret == 0) {
         SAYF("Scheduler closed the connection\n");
         stop_soon = 2;
