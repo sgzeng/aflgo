@@ -208,12 +208,8 @@ uint32_t getBasicblockId(BasicBlock &BB, std::string &filename, unsigned &line, 
   if (!filename.empty() && line != 0 ){
     bb_name_with_col = filename + ":" + std::to_string(line) + ":" + std::to_string(col);
   }else{
-    std::size_t found = filename.find_last_of("/\\");
-    if (found != std::string::npos)
-      filename = filename.substr(found + 1);
     bb_name_with_col = filename + ":unamed:" + std::to_string(unamed++);
   }
-  getDebugLocationFullPath(&BB, filename, line, col);
   return djbHash(bb_name_with_col);
 }
 
@@ -347,19 +343,23 @@ bool AFLCoverage::runOnModule(Module &M) {
 
     std::ifstream cf(DistanceFile);
     if (cf.is_open()) {
-
       std::string line;
       while (getline(cf, line)) {
         if (line.empty()) continue;
         std::stringstream ss(line);
         std::string token;
-        getline(ss, token, ',');
-        uint64_t BB_id = std::stoull(token);
-        // Read filename:loc (not used here)
-        getline(ss, token, ',');
+        uint64_t BB_id;
+        int bb_dis;
+        // Read BB_id
+        if (!getline(ss, token, ',')) continue;
+        std::stringstream bb_id_ss(token);
+        if (!(bb_id_ss >> BB_id)) continue;
+        // Skip filename:loc
+        if (!getline(ss, token, ',')) continue;
         // Read distance
-        getline(ss, token, ',');
-        int bb_dis = (int) atof(token.c_str());
+        if (!getline(ss, token, ',')) continue;
+        std::stringstream dis_ss(token);
+        if (!(dis_ss >> bb_dis)) continue;
         bb_to_dis.emplace(BB_id, bb_dis);
       }
       cf.close();
@@ -574,49 +574,22 @@ bool AFLCoverage::runOnModule(Module &M) {
 
     for (auto &F : M) {
 
-      int distance = -1;
+      long distance = -1;
 
       for (auto &BB : F) {
 
         distance = -2;
 
         if (is_aflgo) {
-
-          std::string bb_name;
-          for (auto &I : BB) {
-            std::string filename;
-            unsigned line;
-            getDebugLoc(&I, filename, line);
-
-            if (filename.empty() || line == 0)
-              continue;
-            std::size_t found = filename.find_last_of("/\\");
-            if (found != std::string::npos)
-              filename = filename.substr(found + 1);
-
-            bb_name = filename + ":" + std::to_string(line);
-            break;
-          }
-
-          if (!bb_name.empty()) {
-
-            if (find(basic_blocks.begin(), basic_blocks.end(), bb_name) == basic_blocks.end()) {
-
-              if (is_selective)
-                continue;
-
-            } else {
-
-              /* Find distance for BB */
-              std::string filename;
-              unsigned line = 0;
-              unsigned col = 0;
-              uint64_t bb_id = (uint64_t) getBasicblockId(BB, filename, line, col);
-              if (bb_to_dis.find(bb_id) != bb_to_dis.end()) {
-                /* Find distance for BB */
-                distance = bb_to_dis[bb_id];
-              }
-            }
+          /* Find distance for BB */
+          std::string filename;
+          unsigned line = 0;
+          unsigned col = 0;
+          uint64_t bb_id = (uint64_t) getBasicblockId(BB, filename, line, col);
+          if (bb_to_dis.find(bb_id) != bb_to_dis.end()) {
+            /* Find distance for BB */
+            distance = bb_to_dis[bb_id];
+            SAYF("found distance(%ld) for BB_ID(%lu)\n", distance, bb_id);
           }
         }
 
@@ -659,12 +632,13 @@ bool AFLCoverage::runOnModule(Module &M) {
         Store->setMetadata(M.getMDKindID("nosanitize"), MDNode::get(C, None));
 
         if (distance >= 0) {
+          ConstantInt *Distance = ConstantInt::get(LargestType, (uint64_t) distance);
 
-          ConstantInt *Distance =
-              ConstantInt::get(LargestType, (unsigned) distance);
-
-          /* Add distance to shm[MAPSIZE] */
-
+          /* Store global minimal BB distance to shm[MAPSIZE]
+          *  sub = distance - map_dist
+          *  lshr = sign(sub) 
+          *  shm[MAPSIZE] = lshr * distance + (1 - lshr) * map_dist
+          */
           Value *MapDistPtr = IRB.CreateBitCast(
               IRB.CreateGEP(MapPtr, MapDistLoc), LargestType->getPointerTo());
           LoadInst *MapDist = IRB.CreateLoad(MapDistPtr);
@@ -682,7 +656,6 @@ bool AFLCoverage::runOnModule(Module &M) {
            ->setMetadata(M.getMDKindID("nosanitize"), MDNode::get(C, None));
 
           /* Increase count at shm[MAPSIZE + (4 or 8)] */
-
           Value *MapCntPtr = IRB.CreateBitCast(
               IRB.CreateGEP(MapPtr, MapCntLoc), LargestType->getPointerTo());
           LoadInst *MapCnt = IRB.CreateLoad(MapCntPtr);
