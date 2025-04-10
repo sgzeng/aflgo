@@ -3268,6 +3268,16 @@ static u8 save_if_interesting(char** argv, void* mem, u32 len, u8 fault) {
   s32 fd;
   u8  keeping = 0, res;
 
+#  if AFLGO_IMPL
+  u64* total_distance = (u64*) (trace_bits + MAP_SIZE);
+  u64* total_count = (u64*) (trace_bits + MAP_SIZE + 8);
+
+  if (*total_count > 0)
+    cur_distance = (double) (*total_distance);
+  else
+    cur_distance = -1.0;
+#  endif // AFLGO_IMPL
+
   if (fault == crash_mode) {
 
     /* Keep only if there are new bits in the map, add to queue for
@@ -3281,8 +3291,8 @@ static u8 save_if_interesting(char** argv, void* mem, u32 len, u8 fault) {
 #ifndef SIMPLE_FILES
 
 #  if AFLGO_IMPL
-    fn = alloc_printf("%s/queue/id:%06u,ts:%llu,dis:%06u,execs:%llu,%s", out_dir, queued_paths,
-                      get_cur_time() - start_time, (u32)cur_distance, total_execs,
+    fn = alloc_printf("%s/queue/id:%06u,ts:%llu,dis:%0.0lf,execs:%llu,%s", out_dir, queued_paths,
+                      get_cur_time() - start_time, cur_distance, total_execs,
                       describe_op(hnb));
 #  else
     fn = alloc_printf("%s/queue/id:%06u,%s", out_dir, queued_paths,
@@ -3371,9 +3381,9 @@ static u8 save_if_interesting(char** argv, void* mem, u32 len, u8 fault) {
 #ifndef SIMPLE_FILES
 
 #  if AFLGO_IMPL
-      fn = alloc_printf("%s/hangs/id:%06llu,%llu,%s", out_dir,
-                        unique_hangs, get_cur_time() - start_time,
-                        describe_op(0));
+      fn = alloc_printf("%s/queue/id:%06llu,ts:%llu,dis:%0.0lf,execs:%llu,%s", out_dir, unique_hangs,
+        get_cur_time() - start_time, cur_distance, total_execs,
+        describe_op(0));
 #  else
       fn = alloc_printf("%s/hangs/id:%06llu,%s", out_dir,
                         unique_hangs, describe_op(0));
@@ -3421,11 +3431,11 @@ keep_as_crash:
 #ifndef SIMPLE_FILES
 
 #  if AFLGO_IMPL
-      fn = alloc_printf("%s/crashes/id:%06llu,ts:%llu,dis:%06u,execs:%llu,sig:%02u,%s", 
+      fn = alloc_printf("%s/crashes/id:%06llu,ts:%llu,dis:%0.0lf,execs:%llu,sig:%02u,%s", 
                         out_dir,
                         unique_crashes,
                         get_cur_time() - start_time,
-                        (u32)cur_distance,
+                        cur_distance,
                         total_execs,
                         kill_signal,
                         describe_op(0));
