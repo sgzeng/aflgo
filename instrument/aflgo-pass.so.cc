@@ -666,12 +666,13 @@ bool AFLCoverage::runOnModule(Module &M) {
               ->setMetadata(M.getMDKindID("nosanitize"), MDNode::get(C, None));
 
 
-        }else if (distance == -1){
-          llvm::FunctionCallee exitFunc = M.getOrInsertFunction(
-              "exit", llvm::FunctionType::get(
-                llvm::Type::getVoidTy(M.getContext()), Int32Ty, false));
-          IRB.CreateCall(exitFunc, {IRB.getInt32(0)});
         }
+	//else if (distance == -1){
+        //  llvm::FunctionCallee exitFunc = M.getOrInsertFunction(
+        //      "exit", llvm::FunctionType::get(
+        //        llvm::Type::getVoidTy(M.getContext()), Int32Ty, false));
+        //  IRB.CreateCall(exitFunc, {IRB.getInt32(0)});
+        //}
 
         inst_blocks++;
 
