@@ -574,7 +574,7 @@ bool AFLCoverage::runOnModule(Module &M) {
 
     for (auto &F : M) {
 
-      long distance = -1;
+      int distance = -1;
 
       for (auto &BB : F) {
 
@@ -589,7 +589,7 @@ bool AFLCoverage::runOnModule(Module &M) {
           if (bb_to_dis.find(bb_id) != bb_to_dis.end()) {
             /* Find distance for BB */
             distance = bb_to_dis[bb_id];
-            SAYF("found distance(%ld) for BB_ID(%lu)\n", distance, bb_id);
+            SAYF("found distance(%d) for BB_ID(%lu)\n", distance, bb_id);
           }
         }
 
