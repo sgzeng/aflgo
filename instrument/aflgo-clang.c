@@ -82,6 +82,14 @@ static void edit_params(u32 argc, char** argv) {
 
   u8 fortify_set = 0, asan_set = 0, x_set = 0, maybe_linking = 1, bit_mode = 0;
   u8 *name;
+  u8 is_assembly_code=0;
+
+  for (int i =1; i < argc; i++) {
+    if (strstr(argv[i], ".s") || strstr(argv[i], ".S")) {
+      is_assembly_code = 1;
+      break;
+    }
+  }
 
   cc_params = ck_alloc((argc + 128) * sizeof(u8*));
 
@@ -128,8 +136,13 @@ static void edit_params(u32 argc, char** argv) {
 
     if (!strncmp(cur, "-distance", 9)
         || !strncmp(cur, "-targets", 8)
-        || !strncmp(cur, "-outdir", 7))
-      cc_params[cc_par_cnt++] = "-mllvm";
+        || !strncmp(cur, "-outdir", 7)) {
+      if(!is_assembly_code) {
+        cc_params[cc_par_cnt++] = "-mllvm";
+      } else {
+        continue;
+      }
+    }
 
     if (!strcmp(cur, "-m32")) bit_mode = 32;
     if (!strcmp(cur, "-m64")) bit_mode = 64;
