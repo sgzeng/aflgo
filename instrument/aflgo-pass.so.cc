@@ -40,6 +40,7 @@
 #include "llvm/Support/FileSystem.h"
 #include "llvm/Support/raw_ostream.h"
 #include "llvm/Analysis/CFGPrinter.h"
+#include "llvm/Support/DJB.h"
 
 #if defined(LLVM34)
 #include "llvm/DebugInfo.h"
@@ -70,6 +71,147 @@ cl::opt<std::string> OutDirectory(
     cl::value_desc("outdir"));
 
 namespace llvm {
+
+/// \brief Retrieve the first available debug location in \p BB that is not
+/// inside /usr/ and store the **absolute, normalized path** in \p Filename.
+/// Sets \p Line and \p Col accordingly.
+///
+/// This version does:
+///  1) Loops over instructions in \p BB
+///  2) Checks the debug location (and possibly inlined-at location)
+///  3) Builds an absolute, normalized path (resolving "." and "..")
+///  4) Skips if the path is empty, line=0, or the path starts with "/usr/"
+///  5) Returns the first valid debug info found
+void getDebugLocationFullPath(const BasicBlock *BB,
+                              std::string &Filename,
+                              unsigned &Line,
+                              unsigned &Col) {
+  Filename.clear();
+  Line = 0;
+  Col = 0;
+
+  // We don't want paths that point to system libraries in /usr/
+  static const std::string Xlibs("/usr/");
+
+  // Iterate over instructions in the basic block
+  for (auto &Inst : *BB) {
+    if (DILocation *Loc = Inst.getDebugLoc()) {
+      // Extract directory & filename
+      std::string Dir  = Loc->getDirectory().str();
+      std::string File = Loc->getFilename().str();
+      unsigned    L    = Loc->getLine();
+      unsigned    C    = Loc->getColumn();
+
+      // If there's no filename, check the inlined location
+      if (File.empty()) {
+        if (DILocation *inlinedAt = Loc->getInlinedAt()) {
+          Dir  = inlinedAt->getDirectory().str();
+          File = inlinedAt->getFilename().str();
+          L    = inlinedAt->getLine();
+          C    = inlinedAt->getColumn();
+        }
+      }
+
+      // Skip if still no filename or line==0
+      if (File.empty() || L == 0)
+        continue;
+
+      // Build an absolute path in a SmallString
+      llvm::SmallString<256> FullPath;
+
+      // 1) If Dir is already absolute, just start with that.
+      //    Otherwise, use the current working directory as a base.
+      if (!Dir.empty() && llvm::sys::path::is_absolute(Dir)) {
+        FullPath = Dir;
+      } else {
+        llvm::sys::fs::current_path(FullPath); // get the current working dir
+        if (!Dir.empty()) {
+          llvm::sys::path::append(FullPath, Dir);
+        }
+      }
+
+      // 2) Append the filename
+      llvm::sys::path::append(FullPath, File);
+
+      // 3) Remove dot segments (both "." and "..")
+      llvm::sys::path::remove_dots(FullPath, /*remove_dot_dot=*/true);
+
+      // Now FullPath is absolute & normalized
+      // Check if it's in /usr/
+      if (StringRef(FullPath).startswith(Xlibs))
+        continue; // skip system-libs
+
+      // Found a valid location => set output vars
+      Filename = FullPath.str().str(); // convert to std::string
+      Line     = L;
+      Col      = C;
+      break; // stop after the first valid location
+    }
+  }
+}
+
+void getInsDebugLoc(const Instruction *I, std::string &Filename,
+                        unsigned &Line, unsigned &Col) {
+  std::string filename;
+  if (DILocation *Loc = I->getDebugLoc()) {
+    Line = Loc->getLine();
+    filename = Loc->getFilename().str();
+    Col = Loc->getColumn();
+    if (filename.empty()) {
+      DILocation *oDILoc = Loc->getInlinedAt();
+      if (oDILoc) {
+        Line = oDILoc->getLine();
+        Col = oDILoc->getColumn();
+        filename = oDILoc->getFilename().str();
+      }
+    }
+    std::size_t found = filename.find_last_of("/\\");
+    if (found != std::string::npos)
+      filename = filename.substr(found + 1);
+    Filename = filename;
+  }
+}
+
+void getBBDebugLoc(const BasicBlock *BB, std::string &Filename, unsigned &Line, unsigned &Col) {
+  std::string bb_name("");
+  std::string filename;
+  unsigned line = 0;
+  unsigned col = 0;
+  for (auto &I : *BB) {
+    getInsDebugLoc(&I, filename, line, col);
+    /* Don't worry about external libs */
+    static const std::string Xlibs("/usr/");
+    if (filename.empty() || line == 0 || !filename.compare(0, Xlibs.size(), Xlibs))
+      continue;
+    Filename = filename;
+    Line = line;
+    Col = col;
+    break;
+  }
+}
+
+void getFuncDebugLoc(const Function *F, std::string &Filename, unsigned &Line) {
+  if (F == nullptr || F->empty()) return;
+    // Again assuming the debug location is attached to the first instruction of the function.
+    const BasicBlock &entry = F->getEntryBlock();
+    if (entry.empty()) return;
+    const Instruction *I = entry.getFirstNonPHIOrDbg();
+    if (I == nullptr) return;
+    unsigned col = 0;
+    getInsDebugLoc(I, Filename, Line, col);
+}
+
+uint32_t getBasicblockId(BasicBlock &BB, std::string &filename, unsigned &line, unsigned &col) {
+  static uint32_t unamed = 0;
+  std::string bb_name_with_col("");
+  getBBDebugLoc(&BB, filename, line, col);
+  if (!filename.empty() && line != 0 ){
+    bb_name_with_col = filename + ":" + std::to_string(line) + ":" + std::to_string(col);
+  }else{
+    bb_name_with_col = filename + ":unamed:" + std::to_string(unamed++);
+  }
+  return djbHash(bb_name_with_col);
+}
 
 template<>
 struct DOTGraphTraits<Function*> : public DefaultDOTGraphTraits {
@@ -179,7 +321,7 @@ bool AFLCoverage::runOnModule(Module &M) {
   }
 
   std::list<std::string> targets;
-  std::map<std::string, int> bb_to_dis;
+  std::map<uint64_t, int> bb_to_dis;
   std::vector<std::string> basic_blocks;
 
   if (!TargetsFile.empty()) {
@@ -201,17 +343,24 @@ bool AFLCoverage::runOnModule(Module &M) {
 
     std::ifstream cf(DistanceFile);
     if (cf.is_open()) {
-
       std::string line;
       while (getline(cf, line)) {
-
-        std::size_t pos = line.find(",");
-        std::string bb_name = line.substr(0, pos);
-        int bb_dis = (int) (100.0 * atof(line.substr(pos + 1, line.length()).c_str()));
-
-        bb_to_dis.emplace(bb_name, bb_dis);
-        basic_blocks.push_back(bb_name);
-
+        if (line.empty()) continue;
+        std::stringstream ss(line);
+        std::string token;
+        uint64_t BB_id;
+        int bb_dis;
+        // Read BB_id
+        if (!getline(ss, token, ',')) continue;
+        std::stringstream bb_id_ss(token);
+        if (!(bb_id_ss >> BB_id)) continue;
+        // Skip filename:loc
+        if (!getline(ss, token, ',')) continue;
+        // Read distance
+        if (!getline(ss, token, ',')) continue;
+        std::stringstream dis_ss(token);
+        if (!(dis_ss >> bb_dis)) continue;
+        bb_to_dis.emplace(BB_id, bb_dis);
       }
       cf.close();
 
@@ -429,45 +578,18 @@ bool AFLCoverage::runOnModule(Module &M) {
 
       for (auto &BB : F) {
 
-        distance = -1;
+        distance = -2;
 
         if (is_aflgo) {
-
-          std::string bb_name;
-          for (auto &I : BB) {
-            std::string filename;
-            unsigned line;
-            getDebugLoc(&I, filename, line);
-
-            if (filename.empty() || line == 0)
-              continue;
-            std::size_t found = filename.find_last_of("/\\");
-            if (found != std::string::npos)
-              filename = filename.substr(found + 1);
-
-            bb_name = filename + ":" + std::to_string(line);
-            break;
-          }
-
-          if (!bb_name.empty()) {
-
-            if (find(basic_blocks.begin(), basic_blocks.end(), bb_name) == basic_blocks.end()) {
-
-              if (is_selective)
-                continue;
-
-            } else {
-
-              /* Find distance for BB */
-
-              if (AFL_R(100) < dinst_ratio) {
-                std::map<std::string,int>::iterator it;
-                for (it = bb_to_dis.begin(); it != bb_to_dis.end(); ++it)
-                  if (it->first.compare(bb_name) == 0)
-                    distance = it->second;
-
-              }
-            }
+          /* Find distance for BB */
+          std::string filename;
+          unsigned line = 0;
+          unsigned col = 0;
+          uint64_t bb_id = (uint64_t) getBasicblockId(BB, filename, line, col);
+          if (bb_to_dis.find(bb_id) != bb_to_dis.end()) {
+            /* Find distance for BB */
+            distance = bb_to_dis[bb_id];
+            SAYF("found distance(%d) for BB_ID(%lu)\n", distance, bb_id);
           }
         }
 
@@ -510,23 +632,30 @@ bool AFLCoverage::runOnModule(Module &M) {
         Store->setMetadata(M.getMDKindID("nosanitize"), MDNode::get(C, None));
 
         if (distance >= 0) {
+          ConstantInt *Distance = ConstantInt::get(LargestType, (uint64_t) distance);
 
-          ConstantInt *Distance =
-              ConstantInt::get(LargestType, (unsigned) distance);
-
-          /* Add distance to shm[MAPSIZE] */
-
+          /* Store global minimal BB distance to shm[MAPSIZE]
+          *  sub = distance - map_dist
+          *  lshr = sign(sub) 
+          *  shm[MAPSIZE] = lshr * distance + (1 - lshr) * map_dist
+          */
           Value *MapDistPtr = IRB.CreateBitCast(
               IRB.CreateGEP(MapPtr, MapDistLoc), LargestType->getPointerTo());
           LoadInst *MapDist = IRB.CreateLoad(MapDistPtr);
           MapDist->setMetadata(M.getMDKindID("nosanitize"), MDNode::get(C, None));
 
-          Value *IncrDist = IRB.CreateAdd(MapDist, Distance);
-          IRB.CreateStore(IncrDist, MapDistPtr)
-              ->setMetadata(M.getMDKindID("nosanitize"), MDNode::get(C, None));
+          Value *Sub = IRB.CreateSub(Distance, MapDist);
+          ConstantInt *Bits = ConstantInt::get(LargestType, 63);
+          Value *Lshr = IRB.CreateLShr(Sub, Bits);
+          Value *Mul1 = IRB.CreateMul(Lshr, Distance);
+          Value *Sub1 = IRB.CreateSub(One, Lshr);
+          Value *Mul2 = IRB.CreateMul(Sub1, MapDist);
+          Value *Incr = IRB.CreateAdd(Mul1, Mul2);
+
+          IRB.CreateStore(Incr, MapDistPtr)
+           ->setMetadata(M.getMDKindID("nosanitize"), MDNode::get(C, None));
 
           /* Increase count at shm[MAPSIZE + (4 or 8)] */
-
           Value *MapCntPtr = IRB.CreateBitCast(
               IRB.CreateGEP(MapPtr, MapCntLoc), LargestType->getPointerTo());
           LoadInst *MapCnt = IRB.CreateLoad(MapCntPtr);
@@ -536,7 +665,14 @@ bool AFLCoverage::runOnModule(Module &M) {
           IRB.CreateStore(IncrCnt, MapCntPtr)
               ->setMetadata(M.getMDKindID("nosanitize"), MDNode::get(C, None));
 
+
         }
+	//else if (distance == -1){
+        //  llvm::FunctionCallee exitFunc = M.getOrInsertFunction(
+        //      "exit", llvm::FunctionType::get(
+        //        llvm::Type::getVoidTy(M.getContext()), Int32Ty, false));
+        //  IRB.CreateCall(exitFunc, {IRB.getInt32(0)});
+        //}
 
         inst_blocks++;
 

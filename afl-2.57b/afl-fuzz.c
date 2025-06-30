@@ -56,6 +56,7 @@
 #include <termios.h>
 #include <dlfcn.h>
 #include <sched.h>
+#include <limits.h>
 
 #include <sys/wait.h>
 #include <sys/time.h>
@@ -69,6 +70,9 @@
 
 #if AFLGO_IMPL
 #  include <math.h>
+#  include <sys/select.h>
+#  include <sys/socket.h>
+#  include <sys/un.h>
 #endif // AFLGO_IMPL
 
 #if defined(__APPLE__) || defined(__FreeBSD__) || defined (__OpenBSD__)
@@ -104,7 +108,8 @@ EXP_ST u8 *in_dir,                    /* Input directory with test cases  */
           *in_bitmap,                 /* Input bitmap                     */
           *doc_path,                  /* Path to documentation dir        */
           *target_path,               /* Path to target binary            */
-          *orig_cmdline;              /* Original command line            */
+          *orig_cmdline,              /* Original command line            */
+          *unix_sock;                 /* UNIX socket path                 */
 
 EXP_ST u32 exec_tmout = EXEC_TIMEOUT; /* Configurable exec timeout (ms)   */
 static u32 hang_tmout = EXEC_TIMEOUT; /* Timeout used for hang det (ms)   */
@@ -156,7 +161,9 @@ static s32 out_fd,                    /* Persistent fd for out_file       */
            dev_urandom_fd = -1,       /* Persistent fd for /dev/urandom   */
            dev_null_fd = -1,          /* Persistent fd for /dev/null      */
            fsrv_ctl_fd,               /* Fork server control pipe (write) */
-           fsrv_st_fd;                /* Fork server status pipe (read)   */
+           fsrv_st_fd,                /* Fork server status pipe (read)   */
+           unix_sock_fd = -1,         /* UNIX server socket fd            */
+           scheduler_fd = -1;         /* MR scheduler client fd           */
 
 static s32 forksrv_pid,               /* PID of the fork server           */
            child_pid = -1,            /* PID of the fuzzed program        */
@@ -951,7 +958,7 @@ static inline u8 has_new_bits(u8* virgin_map) {
   u64* total_count = (u64*) (trace_bits + MAP_SIZE + 8);
 
   if (*total_count > 0)
-    cur_distance = (double) (*total_distance) / (double) (*total_count);
+    cur_distance = (double) (*total_distance);
   else
     cur_distance = -1.0;
 
@@ -972,7 +979,7 @@ static inline u8 has_new_bits(u8* virgin_map) {
   u32* total_count = (u32*)(trace_bits + MAP_SIZE + 4);
 
   if (*total_count > 0) {
-    cur_distance = (double) (*total_distance) / (double) (*total_count);
+    cur_distance = (double) (*total_distance);
   else
     cur_distance = -1.0;
 
@@ -2367,6 +2374,8 @@ static u8 run_target(char** argv, u32 timeout) {
 
 #if AFLGO_IMPL
   memset(trace_bits, 0, MAP_SIZE + 16);
+  u64 max = INT_MAX;
+  memcpy(trace_bits+MAP_SIZE, &max, sizeof(u64));
 #else
   memset(trace_bits, 0, MAP_SIZE);
 #endif // AFLGO_IMPL
@@ -3259,6 +3268,16 @@ static u8 save_if_interesting(char** argv, void* mem, u32 len, u8 fault) {
   s32 fd;
   u8  keeping = 0, res;
 
+#  if AFLGO_IMPL
+  u64* total_distance = (u64*) (trace_bits + MAP_SIZE);
+  u64* total_count = (u64*) (trace_bits + MAP_SIZE + 8);
+
+  if (*total_count > 0)
+    cur_distance = (double) (*total_distance);
+  else
+    cur_distance = -1.0;
+#  endif // AFLGO_IMPL
+
   if (fault == crash_mode) {
 
     /* Keep only if there are new bits in the map, add to queue for
@@ -3272,8 +3291,8 @@ static u8 save_if_interesting(char** argv, void* mem, u32 len, u8 fault) {
 #ifndef SIMPLE_FILES
 
 #  if AFLGO_IMPL
-    fn = alloc_printf("%s/queue/id:%06u,%llu,%s", out_dir, queued_paths,
-                      get_cur_time() - start_time,
+    fn = alloc_printf("%s/queue/id:%06u,ts:%llu,dis:%0.0lf,execs:%llu,%s", out_dir, queued_paths,
+                      get_cur_time() - start_time, cur_distance, total_execs,
                       describe_op(hnb));
 #  else
     fn = alloc_printf("%s/queue/id:%06u,%s", out_dir, queued_paths,
@@ -3362,9 +3381,9 @@ static u8 save_if_interesting(char** argv, void* mem, u32 len, u8 fault) {
 #ifndef SIMPLE_FILES
 
 #  if AFLGO_IMPL
-      fn = alloc_printf("%s/hangs/id:%06llu,%llu,%s", out_dir,
-                        unique_hangs, get_cur_time() - start_time,
-                        describe_op(0));
+      fn = alloc_printf("%s/queue/id:%06llu,ts:%llu,dis:%0.0lf,execs:%llu,%s", out_dir, unique_hangs,
+        get_cur_time() - start_time, cur_distance, total_execs,
+        describe_op(0));
 #  else
       fn = alloc_printf("%s/hangs/id:%06llu,%s", out_dir,
                         unique_hangs, describe_op(0));
@@ -3412,9 +3431,14 @@ keep_as_crash:
 #ifndef SIMPLE_FILES
 
 #  if AFLGO_IMPL
-      fn = alloc_printf("%s/crashes/id:%06llu,%llu,sig:%02u,%s", out_dir,
-                        unique_crashes, get_cur_time() - start_time,
-                        kill_signal, describe_op(0));
+      fn = alloc_printf("%s/crashes/id:%06llu,ts:%llu,dis:%0.0lf,execs:%llu,sig:%02u,%s", 
+                        out_dir,
+                        unique_crashes,
+                        get_cur_time() - start_time,
+                        cur_distance,
+                        total_execs,
+                        kill_signal,
+                        describe_op(0));
 #  else
       fn = alloc_printf("%s/crashes/id:%06llu,sig:%02u,%s", out_dir,
                         unique_crashes, kill_signal, describe_op(0));
@@ -7011,6 +7035,71 @@ static void sync_fuzzers(char** argv) {
 }
 
 
+/* Import an input from the external scheduler */
+
+static void import_input(u32 file_id, char** argv) {
+
+  stage_max = stage_cur = 0;
+  cur_depth = 0;
+
+  u8* path;
+  s32 fd;
+  struct stat st;
+
+  path = alloc_printf("%s/id_%d", sync_dir, file_id);
+  OKF("Importing test case from '%s'...", path);
+
+  /* Allow this to fail in case the other fuzzer is resuming or so... */
+
+  fd = open(path, O_RDONLY);
+
+  if (fd < 0) {
+    PFATAL("Unable to open '%s'", path);
+    ck_free(path);
+    return;
+  }
+
+  if (fstat(fd, &st)) {
+    PFATAL("fstat() failed");
+    ck_free(path);
+    close(fd);
+    return;
+  }
+
+  /* Ignore zero-sized or oversized files. */
+
+  if (st.st_size && st.st_size <= MAX_FILE) {
+
+    u8  fault;
+    u8* mem = mmap(0, st.st_size, PROT_READ, MAP_PRIVATE, fd, 0);
+
+    if (mem == MAP_FAILED) PFATAL("Unable to mmap '%s'", path);
+
+    /* See what happens. We rely on save_if_interesting() to catch major
+       errors and save the test case. */
+
+    write_to_testcase(mem, st.st_size);
+
+    fault = run_target(argv, exec_tmout);
+
+    if (stop_soon) return;
+
+    syncing_party = "scheduler";
+    queued_imported += save_if_interesting(argv, mem, st.st_size, fault);
+    syncing_party = 0;
+
+    munmap(mem, st.st_size);
+
+    if (!(stage_cur++ % stats_update_freq)) show_stats();
+
+  }
+
+  ck_free(path);
+  close(fd);
+
+}
+
+
 /* Handle stop signal (Ctrl-C, etc). */
 
 static void handle_stop_sig(int sig) {
@@ -7727,6 +7816,31 @@ static void fix_up_sync(void) {
     use_splicing = 1;
   }
 
+#if AFLGO_IMPL
+
+  /* setup server */
+  if (unix_sock) {
+    struct sockaddr_un addr;
+
+    unix_sock_fd = socket(AF_UNIX, SOCK_STREAM, 0);
+    if (unix_sock_fd == -1)
+      FATAL("Failed to create unix socket");
+
+    memset(&addr, 0, sizeof(addr));
+    addr.sun_family = AF_UNIX;
+    strncpy(addr.sun_path, unix_sock, sizeof(addr.sun_path) - 1);
+
+    unlink(unix_sock); /* remove existing socket file */
+    if (bind(unix_sock_fd, (struct sockaddr*)&addr, sizeof(addr)) == -1)
+      FATAL("Failed to bind to the listening path");
+
+    if (listen(unix_sock_fd, 2) == -1)
+      FATAL("Failed to listen for fuzzing request");
+
+    OKF("Listening at " cBRI "%s for fuzzing request" cRST, unix_sock);
+
+  }
+#endif
 }
 
 
@@ -8003,7 +8117,7 @@ int main(int argc, char** argv) {
   srandom(tv.tv_sec ^ tv.tv_usec ^ getpid());
 
 #if AFLGO_IMPL
-  while ((opt = getopt(argc, argv, "+i:o:f:m:t:T:dnCB:S:M:x:Qz:c:")) > 0)
+  while ((opt = getopt(argc, argv, "+i:o:f:m:t:T:dnCB:S:M:x:Qz:c:l:")) > 0)
 #else
   while ((opt = getopt(argc, argv, "+i:o:f:m:t:T:dnCB:S:M:x:Q")) > 0)
 #endif // AFLGO_IMPL
@@ -8215,6 +8329,12 @@ int main(int argc, char** argv) {
 
         break;
 
+      case 'l': /* passive fuzzing mode */
+
+        if (unix_sock) FATAL("Multiple -l options not supported");
+        unix_sock = ck_strdup(optarg);
+        break;
+
 #endif // AFLGO_IMPL
 
       default:
@@ -8337,10 +8457,127 @@ int main(int argc, char** argv) {
     start_time += 4000;
     if (stop_soon) goto stop_fuzzing;
   }
-
+#if AFLGO_IMPL
+  if (unix_sock_fd != -1) queue_cycle = 1;
+#endif
   while (1) {
 
     u8 skipped_fuzz;
+
+#if AFLGO_IMPL
+
+    /* if in passive scheduling mode, do not run fuzzing loop */
+    if (unix_sock_fd != -1) {
+
+      fd_set readfds;
+      s32 activity;
+
+      /* accept the connection if not done */
+      if (unlikely(scheduler_fd == -1)) {
+
+        FD_ZERO(&readfds);
+        FD_SET(unix_sock_fd, &readfds);
+
+        /* checking period */
+        tv.tv_sec = 1;
+        tv.tv_usec = 0;
+
+        /* use select to give ctrl-c a chance to stop the fuzzer */
+        activity = select(unix_sock_fd + 1, &readfds, NULL, NULL, &tv);
+        if (activity < 0) {
+          PFATAL("Failed to select unix sock fd");
+          break;
+        } else if (activity == 0) {
+          /* nothing happened yet, check stop_soon */
+          if (stop_soon) break;
+          else continue;
+        }
+
+        scheduler_fd = accept(unix_sock_fd, NULL, NULL);
+        if (scheduler_fd == -1) {
+          PFATAL("Failed to accept scheduler request");
+          break;
+        }
+
+      }
+
+      FD_ZERO(&readfds);
+      FD_SET(scheduler_fd, &readfds);
+
+      /* use select to give ctrl-c a chance to stop the fuzzer */
+      activity = select(scheduler_fd + 1, &readfds, NULL, NULL, &tv);
+      if (activity < 0) {
+        PFATAL("Failed to select on scheduler fd");
+        break;
+      } else if (activity == 0) {
+        /* nothing to import, check stop_soon */
+        if (stop_soon) break;
+        else continue;
+      }
+
+      u32 file_id;
+      s32 ret = recv(scheduler_fd, &file_id, sizeof(file_id), MSG_WAITALL);
+      if (ret == 0) {
+        SAYF("Scheduler closed the connection\n");
+        stop_soon = 2;
+        break;
+      } else if (ret != sizeof(file_id)) {
+        PFATAL("Failed to receive file_id from the scheduler");
+        break;
+      }
+      SAYF("Received file_id %u from the scheduler\n", file_id);
+
+      /* use bit 31 to indicate whehter to import or find an existing one */
+      u8 import = (file_id & 0x80000000) >> 31;
+      file_id &= 0x7fffffff;
+
+      if (import) {
+
+        import_input(file_id, use_argv);
+        queue_cur = queue_top; /* new imported seed is always at top */
+        SAYF("Imported new seed %s\n", queue_cur->fname);
+
+      } else {
+
+        u8 fid[11];
+        snprintf(fid, 11, "%06u", file_id);
+
+        /* set default, just in case */
+        queue_cur = queue_top;
+
+        /* scan existing queue */
+        for (struct queue_entry *q = queue; q != NULL; q = q->next) {
+          u8 *rsl = strrchr(q->fname, '/');
+          if (!rsl) rsl = q->fname; else rsl++;
+
+          if (strncmp(rsl + 3, fid, 6) == 0) {
+            queue_cur = q;
+            SAYF("Found existing seed %s\n", q->fname);
+            break;
+          }
+        }
+
+      }
+
+      queue_cur->favored = 1;
+      pending_favored = 0;
+      skipped_fuzz = fuzz_one(use_argv);
+
+      if (send(scheduler_fd, &unique_crashes, sizeof(unique_crashes), 0) < 0) {
+        SAYF("Scheduler closed the connection\n");
+        stop_soon = 2;
+      } else {
+        SAYF("Sent unique_crashes %llu to scheduler\n", unique_crashes);
+      }
+      current_entry++;
+
+      if (stop_soon) break;
+
+      continue; /* skip the rest */
+
+    }
+
+#endif
 
     cull_queue();
 
@@ -8435,6 +8672,14 @@ stop_fuzzing:
   destroy_extras();
   ck_free(target_path);
   ck_free(sync_id);
+#if AFLGO_IMPL
+  if (unix_sock) {
+    close(scheduler_fd);
+    close(unix_sock_fd);
+    unlink(unix_sock);
+    ck_free(unix_sock);
+  }
+#endif
 
   alloc_report();
 
